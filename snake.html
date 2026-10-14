@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Snake.io Clone</title>
+
+<style>
+html, body {
+    margin: 0;
+    overflow: hidden;
+    background: #111;
+    font-family: Arial, sans-serif;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+canvas {
+    display: block;
+}
+
+#hud {
+    position: absolute;
+    top: 15px;
+    left: 15px;
+    color: white;
+    font-size: 22px;
+    z-index: 100;
+    pointer-events: none;
+    text-shadow: 0 1px 3px #000;
+}
+
+#instructions {
+    position: absolute;
+    bottom: 15px;
+    left: 15px;
+    color: #ccc;
+    font-size: 14px;
+    pointer-events: none;
+    text-shadow: 0 1px 3px #000;
+}
+</style>
+</head>
+
+<body>
+
+<div id="hud">
+    Length: <span id="score">15</span>
+</div>
+
+<div id="instructions">
+    Move Mouse = Steer | Hold Space or Mouse Button = Boost (costs length)
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+"use strict";
+
+// ============================================================
+// Config
+// ============================================================
+
+const WORLD_WIDTH = 5000;
+const WORLD_HEIGHT = 5000;
+
+const SEGMENT_SPACING = 6;        // fixed distance between body segments
+const START_LENGTH = 15;
+const BASE_SPEED = 2.2;           // pixels per frame at 60fps
+const BOOST_SPEED = 4.4;
+const MIN_BOOST_LENGTH = 12;      // can't boost below this length
+const BOOST_COST_INTERVAL = 8;    // frames of boosting per 1 length lost
+const BASE_TURN_RATE = 0.11;      // max radians turned per frame at 60fps
+
+const AMBIENT_FOOD_TARGET = 3000; // ambient food is kept at this count
+const DROPPED_FOOD_LIFE = 3600;   // dropped food disappears after ~60s
+
+const BOT_COUNT = 12;
+const BOT_RESPAWN_DELAY = 120;    // frames before a dead bot is replaced
+const BOT_START_MIN = 8;          // bots spawn between these lengths
+const BOT_START_MAX = 20;         // (player starts at START_LENGTH = 15)
+
+const CELL_SIZE = 200;            // spatial grid cell size for food lookups
+const GRID_COLS = Math.ceil(WORLD_WIDTH / CELL_SIZE);
+const GRID_ROWS = Math.ceil(WORLD_HEIGHT / CELL_SIZE);
+
+const PLAYER_COLOR = "#00ff88";
+
+const BOT_COLORS = [
+    "#00aaff",
+    "#ff4444",
+    "#ffcc00",
+    "#ff00cc",
+    "#aa88ff",
+    "#ff8800",
+    "#44ffee"
+];
+
+const BOT_NAMES = [
+    "Noodle", "Zigzag", "Mamba", "Wiggles", "Slinky", "Fang",
+    "Ribbon", "Squiggle", "Dash", "Pretzel", "Boa", "Sidewinder",
+    "Spaghetti", "Coil", "Rattler", "Swoosh"
+];
+
+// ============================================================
+// Canvas setup (crisp on high-DPI screens)
+// ============================================================
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let dpr = 1;
+let viewW = 0;
+let viewH = 0;
+
+function resize() {
+    dpr = window.devicePixelRatio || 1;
+    viewW = window.innerWidth;
+    viewH = window.innerHeight;
+    canvas.width = Math.floor(viewW * dpr);
+    canvas.height = Math.floor(viewH * dpr);
+    canvas.style.width = viewW + "px";
+    canvas.style.height = viewH + "px";
+}
+resize();
+window.addEventListener("resize", resize);
+
+// ============================================================
+// Input (mouse, keyboard, touch)
+// ============================================================
+
+let mouseX = window.innerWidth / 2;
+let mouseY = window.innerHeight / 2;
+let spaceDown = false;
+let mouseDown = false;
+let touchBoost = false;
+
+document.addEventListener("mousemove", e => {
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+});
+
+document.addEventListener("mousedown", e => {
+    if (gameState === "dead") {
+        tryRestart();
+        return;
+    }
+    if (e.button === 0) mouseDown = true;
+});
+
+document.addEventListener("mouseup", e => {
+    if (e.button === 0) mouseDown = false;
+});
+
+document.addEventListener("keydown", e => {
+    if (e.code === "Space") {
+        e.preventDefault();
+        if (gameState === "dead" && !e.repeat) {
+            tryRestart();
+            return;
+        }
+        spaceDown = true;
+    }
+});
+
+document.addEventListener("keyup", e => {
+    if (e.code === "Space") spaceDown = false;
+});
+
+function handleTouch(e) {
+    e.preventDefault();
+    if (e.touches.length > 0) {
+        mouseX = e.touches[0].clientX;
+        mouseY = e.touches[0].clientY;
+    }
+    touchBoost = e.touches.length > 1; // two fingers = boost
+}
+
+canvas.addEventListener("touchstart", e => {
+    if (gameState === "dead") {
+        e.preventDefault();
+        tryRestart();
+        return;
+    }
+    handleTouch(e);
+}, { passive: false });
+
+canvas.addEventListener("touchmove", handleTouch, { passive: false });
+canvas.addEventListener("touchend", handleTouch, { passive: false });
+
+window.addEventListener("blur", () => {
+    spaceDown = false;
+    mouseDown = false;
+    touchBoost = false;
+});
+
+// ============================================================
+// Helpers
+// ============================================================
+
+function rand(min, max) {
+    return min + Math.random() * (max - min);
+}
+
+function clamp(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+}
+
+function wrapAngle(a) {
+    while (a > Math.PI) a -= Math.PI * 2;
+    while (a < -Math.PI) a += Math.PI * 2;
+    return a;
+}
+
+// Turn toward a target angle, but never faster than maxTurn
+function steerTowards(snake, targetAngle, maxTurn) {
+    const diff = wrapAngle(targetAngle - snake.angle);
+    snake.angle = wrapAngle(snake.angle + clamp(diff, -maxTurn, maxTurn));
+}
+
+// ============================================================
+// Food + spatial grid
+// ============================================================
+
+let foods = [];
+let ambientCount = 0;
+
+const foodGrid = [];
+for (let i = 0; i < GRID_COLS * GRID_ROWS; i++) foodGrid.push([]);
+
+function makeFood(x, y, size, color, dropped) {
+    return {
+        x: x,
+        y: y,
+        size: size,
+        value: size / 4.5,        // bigger pellets are worth more
+        color: color,
+        dropped: dropped,
+        life: dropped ? DROPPED_FOOD_LIFE : Infinity,
+        phase: Math.random() * Math.PI * 2,
+        eaten: false
+    };
+}
+
+function spawnAmbientFood() {
+    foods.push(makeFood(
+        rand(20, WORLD_WIDTH - 20),
+        rand(20, WORLD_HEIGHT - 20),
+        rand(3, 6),
+        `hsl(${Math.floor(Math.random() * 360)},100%,60%)`,
+        false
+    ));
+    ambientCount++;
+}
+
+function dropFood(x, y, size, color) {
+    foods.push(makeFood(
+        clamp(x, 5, WORLD_WIDTH - 5),
+        clamp(y, 5, WORLD_HEIGHT - 5),
+        size,
+        color,
+        true
+    ));
+}
+
+function cellIndex(x, y) {
+    const cx = clamp(Math.floor(x / CELL_SIZE), 0, GRID_COLS - 1);
+    const cy = clamp(Math.floor(y / CELL_SIZE), 0, GRID_ROWS - 1);
+    return cy * GRID_COLS + cx;
+}
+
+function rebuildFoodGrid() {
+    for (const cell of foodGrid) cell.length = 0;
+    for (const f of foods) foodGrid[cellIndex(f.x, f.y)].push(f);
+}
+
+// Visit every uneaten food pellet in the grid cells around (x, y)
+function forEachFoodNear(x, y, radius, callback) {
+    const x0 = clamp(Math.floor((x - radius) / CELL_SIZE), 0, GRID_COLS - 1);
+    const x1 = clamp(Math.floor((x + radius) / CELL_SIZE), 0, GRID_COLS - 1);
+    const y0 = clamp(Math.floor((y - radius) / CELL_SIZE), 0, GRID_ROWS - 1);
+    const y1 = clamp(Math.floor((y + radius) / CELL_SIZE), 0, GRID_ROWS - 1);
+
+    for (let cy = y0; cy <= y1; cy++) {
+        for (let cx = x0; cx <= x1; cx++) {
+            const cell = foodGrid[cy * GRID_COLS + cx];
+            for (let i = 0; i < cell.length; i++) {
+                if (!cell[i].eaten) callback(cell[i]);
+            }
+        }
+    }
+}
+
+function updateFood(dt) {
+    // Remove eaten and expired food in one pass
+    let write = 0;
+    for (let i = 0; i < foods.length; i++) {
+        const f = foods[i];
+        if (f.dropped) {
+            f.life -= dt;
+            if (f.life <= 0) f.eaten = true;
+        }
+        if (f.eaten) {
+            if (!f.dropped) ambientCount--;
+            continue;
+        }
+        foods[write++] = f;
+    }
+    foods.length = write;
+
+    // Keep ambient food topped up (dropped food doesn't count)
+    while (ambientCount < AMBIENT_FOOD_TARGET) spawnAmbientFood();
+
+    rebuildFoodGrid();
+}
+
+// ============================================================
+// Snake
+// ============================================================
+
+class Snake {
+
+    constructor(x, y, color, isPlayer = false, length = START_LENGTH, name = "Bot") {
+
+        this.isPlayer = isPlayer;
+        this.color = color;
+        this.name = name;
+
+        this.angle = isPlayer ? 0 : rand(-Math.PI, Math.PI);
+        this.targetAngle = this.angle;
+
+        this.head = { x: x, y: y };
+        this.length = length;
+
+        // Lay the body out in a straight line behind the head
+        this.segments = [];
+        const count = Math.max(1, Math.floor(length));
+        for (let i = 0; i < count; i++) {
+            this.segments.push({
+                x: x - Math.cos(this.angle) * i * SEGMENT_SPACING,
+                y: y - Math.sin(this.angle) * i * SEGMENT_SPACING
+            });
+        }
+
+        this.speed = BASE_SPEED;
+        this.boosting = false;
+        this.boostTimer = 0;
+        this.alive = true;
+
+        // Bot brain state
+        this.thinkTimer = 0;
+        this.botBoostTimer = 0;
+        this.aggression = Math.random();
+    }
+
+    // Snakes get thicker as they grow
+    get radius() {
+        return 7 + Math.sqrt(this.length) * 0.6;
+    }
+
+    // ...and turn a little slower
+    get turnRate() {
+        return BASE_TURN_RATE / (1 + this.length / 600);
+    }
+
+    outOfBounds() {
+        return this.head.x < 0 || this.head.x > WORLD_WIDTH ||
+               this.head.y < 0 || this.head.y > WORLD_HEIGHT;
+    }
+
+    update(dt) {
+
+        if (!this.alive) return;
+
+        steerTowards(this, this.targetAngle, this.turnRate * dt);
+
+        // Boosting is faster but sheds length as food
+        const canBoost = this.boosting && this.length > MIN_BOOST_LENGTH;
+        this.speed = canBoost ? BOOST_SPEED : BASE_SPEED;
+
+        if (canBoost) {
+            this.boostTimer += dt;
+            while (this.boostTimer >= BOOST_COST_INTERVAL && this.length > MIN_BOOST_LENGTH) {
+                this.boostTimer -= BOOST_COST_INTERVAL;
+                this.length -= 1;
+                const tail = this.segments[this.segments.length - 1];
+                // value < 1, so boosting is always a net loss
+                dropFood(tail.x + rand(-4, 4), tail.y + rand(-4, 4), 4, this.color);
+            }
+        } else {
+            this.boostTimer = 0;
+        }
+
+        this.head.x += Math.cos(this.angle) * this.speed * dt;
+        this.head.y += Math.sin(this.angle) * this.speed * dt;
+
+        // Follow-the-leader: each segment stays a fixed distance
+        // behind the one in front, regardless of speed
+        const segs = this.segments;
+        segs[0].x = this.head.x;
+        segs[0].y = this.head.y;
+
+        for (let i = 1; i < segs.length; i++) {
+            const prev = segs[i - 1];
+            const seg = segs[i];
+            const dx = seg.x - prev.x;
+            const dy = seg.y - prev.y;
+            const d = Math.hypot(dx, dy) || 1;
+            seg.x = prev.x + (dx / d) * SEGMENT_SPACING;
+            seg.y = prev.y + (dy / d) * SEGMENT_SPACING;
+        }
+
+        // Grow / shrink to match length
+        const target = Math.max(1, Math.floor(this.length));
+        while (segs.length < target) {
+            const tail = segs[segs.length - 1];
+            segs.push({ x: tail.x, y: tail.y });
+        }
+        while (segs.length > target) segs.pop();
+    }
+
+    draw(view) {
+
+        const segs = this.segments;
+        const n = segs.length;
+        const r = this.radius;
+        const boostingNow = this.speed > BASE_SPEED;
+
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = boostingNow ? "rgba(255,255,255,.6)" : "rgba(255,255,255,.22)";
+
+        for (let i = n - 1; i >= 0; i--) {
+
+            const s = segs[i];
+
+            // Skip segments that are off screen
+            if (s.x < view.left - r || s.x > view.right + r ||
+                s.y < view.top - r || s.y > view.bottom + r) continue;
+
+            // Taper the last 20% of the body
+            const t = i / n;
+            const size = t > 0.8 ? r * (1 - (t - 0.8) * 2) : r;
+
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, size, 0, Math.PI * 2);
+
+            ctx.fillStyle = this.color;
+            ctx.fill();
+
+            // Stripes
+            if (i % 6 < 3) {
+                ctx.fillStyle = "rgba(0,0,0,.14)";
+                ctx.fill();
+            }
+
+            ctx.stroke();
+        }
+
+        // Eyes follow the direction of travel
+        const hx = this.head.x;
+        const hy = this.head.y;
+        const fx = Math.cos(this.angle);
+        const fy = Math.sin(this.angle);
+        const px = -fy;
+        const py = fx;
+        const eyeR = r * 0.32;
+
+        for (const side of [-1, 1]) {
+            const ex = hx + fx * r * 0.35 + px * side * r * 0.45;
+            const ey = hy + fy * r * 0.35 + py * side * r * 0.45;
+
+            ctx.fillStyle = "white";
+            ctx.beginPath();
+            ctx.arc(ex, ey, eyeR, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = "black";
+            ctx.beginPath();
+            ctx.arc(ex + fx * eyeR * 0.4, ey + fy * eyeR * 0.4, eyeR * 0.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Name tag for bots
+        if (!this.isPlayer) {
+            ctx.fillStyle = "rgba(255,255,255,.7)";
+            ctx.font = "12px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(this.name, hx, hy - r - 10);
+        }
+    }
+}
+
+// ============================================================
+// World state
+// ============================================================
+
+let player = null;
+let bots = [];
+let respawnQueue = [];
+let botNameIndex = 0;
+
+let gameState = "playing"; // "playing" | "dead"
+let deadTimer = 0;
+let finalLength = 0;
+let bestLength = loadBest();
+
+const camera = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, zoom: 1 };
+
+function loadBest() {
+    try {
+        return parseInt(localStorage.getItem("snakeBest") || "0", 10) || 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
+function saveBest() {
+    try {
+        localStorage.setItem("snakeBest", String(bestLength));
+    } catch (e) {
+        // storage unavailable, ignore
+    }
+}
+
+function allSnakes() {
+    return player ? [player, ...bots] : bots.slice();
+}
+
+function nextBotName() {
+    const name = BOT_NAMES[botNameIndex % BOT_NAMES.length];
+    botNameIndex++;
+    return name;
+}
+
+// Pick a spawn point far from other snakes
+function findSafeSpawn(minDist, exclude) {
+    let best = null;
+    let bestDist = -1;
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+        const x = rand(500, WORLD_WIDTH - 500);
+        const y = rand(500, WORLD_HEIGHT - 500);
+        let nearest = Infinity;
+
+        for (const s of allSnakes()) {
+            if (!s.alive || s === exclude) continue;
+            for (let i = 0; i < s.segments.length; i += 3) {
+                const d = Math.hypot(s.segments[i].x - x, s.segments[i].y - y);
+                if (d < nearest) nearest = d;
+            }
+        }
+
+        if (nearest >= minDist) return { x, y };
+        if (nearest > bestDist) {
+            bestDist = nearest;
+            best = { x, y };
+        }
+    }
+    return best;
+}
+
+function spawnBot(length) {
+    const p = findSafeSpawn(700);
+    const color = BOT_COLORS[Math.floor(Math.random() * BOT_COLORS.length)];
+    const bot = new Snake(p.x, p.y, color, false, length, nextBotName());
+    bots.push(bot);
+}
+
+function startPlayer() {
+    const p = player ? findSafeSpawn(600) : { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+    player = new Snake(p.x, p.y, PLAYER_COLOR, true, START_LENGTH, "You");
+    camera.x = p.x;
+    camera.y = p.y;
+    gameState = "playing";
+}
+
+function killSnake(snake) {
+
+    if (!snake.alive) return;
+    snake.alive = false;
+
+    // Burst into food along the body
+    const r = snake.radius;
+    for (let i = 0; i < snake.segments.length; i += 2) {
+        const s = snake.segments[i];
+        dropFood(s.x + rand(-r / 2, r / 2), s.y + rand(-r / 2, r / 2), rand(5, 8), snake.color);
+    }
+
+    if (snake.isPlayer) {
+        gameState = "dead";
+        deadTimer = 0;
+        finalLength = Math.floor(snake.length);
+        if (finalLength > bestLength) {
+            bestLength = finalLength;
+            saveBest();
+        }
+    } else {
+        respawnQueue.push(BOT_RESPAWN_DELAY);
+    }
+}
+
+function tryRestart() {
+    if (gameState !== "dead" || deadTimer < 30) return;
+    startPlayer();
+}
+
+// ============================================================
+// Eating
+// ============================================================
+
+function eatFood(snake, dt) {
+
+    if (!snake.alive) return;
+
+    const hx = snake.head.x;
+    const hy = snake.head.y;
+    const r = snake.radius;
+    const pullRadius = r + 30;
+
+    forEachFoodNear(hx, hy, pullRadius, f => {
+        const dx = hx - f.x;
+        const dy = hy - f.y;
+        const d = Math.hypot(dx, dy);
+
+        if (d < r + f.size * 0.5) {
+            f.eaten = true;
+            snake.length += f.value;
+        } else if (d < pullRadius) {
+            // Nearby food gets sucked toward the head
+            const step = Math.min(d, 3 * dt);
+            f.x += (dx / d) * step;
+            f.y += (dy / d) * step;
+        }
+    });
+}
+
+// ============================================================
+// Bot AI
+// ============================================================
+
+function botThink(bot, dt) {
+
+    bot.botBoostTimer = Math.max(0, bot.botBoostTimer - dt);
+    bot.boosting = bot.botBoostTimer > 0;
+
+    // Only re-plan every few frames; steering still happens every frame
+    bot.thinkTimer -= dt;
+    if (bot.thinkTimer > 0) return;
+    bot.thinkTimer = rand(5, 9);
+
+    const h = bot.head;
+    const r = bot.radius;
+
+    // 1. Stay away from the walls
+    const margin = 200 + r * 4;
+    if (h.x < margin || h.x > WORLD_WIDTH - margin ||
+        h.y < margin || h.y > WORLD_HEIGHT - margin) {
+        bot.targetAngle = Math.atan2(WORLD_HEIGHT / 2 - h.y, WORLD_WIDTH / 2 - h.x);
+        return;
+    }
+
+    // 2. Avoid other snakes' bodies ahead
+    const look = r * 3 + 50;
+    const cosA = Math.cos(bot.angle);
+    const sinA = Math.sin(bot.angle);
+    const probes = [
+        { x: h.x + cosA * look * 0.5, y: h.y + sinA * look * 0.5 },
+        { x: h.x + cosA * look, y: h.y + sinA * look }
+    ];
+
+    let threat = null;
+    let threatDist = Infinity;
+
+    for (const other of allSnakes()) {
+
+        if (other === bot || !other.alive) continue;
+
+        const reach = other.segments.length * SEGMENT_SPACING + look + 100;
+        if (Math.abs(other.head.x - h.x) > reach || Math.abs(other.head.y - h.y) > reach) continue;
+
+        const danger = other.radius + r + 25;
+        const danger2 = danger * danger;
+
+        for (let i = 0; i < other.segments.length; i += 2) {
+            const s = other.segments[i];
+            for (const p of probes) {
+                const dx = s.x - p.x;
+                const dy = s.y - p.y;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < danger2 && d2 < threatDist) {
+                    threatDist = d2;
+                    threat = s;
+                }
+            }
+        }
+    }
+
+    if (threat) {
+        // Turn away from whichever side the threat is on
+        const cross = cosA * (threat.y - h.y) - sinA * (threat.x - h.x);
+        bot.targetAngle = bot.angle + (cross > 0 ? -1 : 1) * Math.PI / 2;
+        if (bot.length > 40 && Math.random() < 0.3) bot.botBoostTimer = 20;
+        return;
+    }
+
+    // 3. Aggressive bigger bots try to cut off the player
+    if (player && player.alive && bot.aggression > 0.6 && bot.length > player.length + 10) {
+        const d = Math.hypot(player.head.x - h.x, player.head.y - h.y);
+        if (d < 450) {
+            const tx = player.head.x + Math.cos(player.angle) * 90;
+            const ty = player.head.y + Math.sin(player.angle) * 90;
+            bot.targetAngle = Math.atan2(ty - h.y, tx - h.x);
+            if (Math.random() < 0.25) bot.botBoostTimer = 30;
+            return;
+        }
+    }
+
+    // 4. Go for the best nearby food (prefers food that's ahead)
+    let best = null;
+    let bestScore = 0;
+
+    forEachFoodNear(h.x, h.y, 350, f => {
+        const dx = f.x - h.x;
+        const dy = f.y - h.y;
+        const d = Math.hypot(dx, dy) + 1;
+        const off = Math.abs(wrapAngle(Math.atan2(dy, dx) - bot.angle));
+        const score = (f.value / d) * (off < 1.2 ? 1.5 : 0.6);
+        if (score > bestScore) {
+            bestScore = score;
+            best = f;
+        }
+    });
+
+    if (best) {
+        bot.targetAngle = Math.atan2(best.y - h.y, best.x - h.x);
+    } else {
+        bot.targetAngle = bot.angle + rand(-0.6, 0.6); // wander
+    }
+}
+
+function updateBots(dt) {
+
+    for (const bot of bots) {
+        if (!bot.alive) continue;
+        botThink(bot, dt);
+        bot.update(dt);
+        eatFood(bot, dt);
+    }
+
+    bots = bots.filter(b => b.alive);
+
+    // Respawn dead bots after a short delay
+    for (let i = respawnQueue.length - 1; i >= 0; i--) {
+        respawnQueue[i] -= dt;
+        if (respawnQueue[i] <= 0) {
+            respawnQueue.splice(i, 1);
+            spawnBot(Math.floor(rand(BOT_START_MIN, BOT_START_MAX + 1)));
+        }
+    }
+}
+
+// ============================================================
+// Collisions
+// ============================================================
+
+function checkCollisions() {
+
+    const snakes = allSnakes().filter(s => s.alive);
+    const dead = new Set();
+
+    for (const s of snakes) {
+        if (s.outOfBounds()) dead.add(s);
+    }
+
+    // Any snake whose head touches another snake's body dies.
+    // Head-to-head: the shorter one dies (both if equal).
+    for (const a of snakes) {
+
+        const ah = a.head;
+        const ar = a.radius;
+
+        for (const b of snakes) {
+
+            if (a === b) continue;
+
+            // Cheap rejection before checking every segment
+            const reach = b.segments.length * SEGMENT_SPACING + b.radius + ar;
+            if (Math.abs(b.head.x - ah.x) > reach || Math.abs(b.head.y - ah.y) > reach) continue;
+
+            const hitR = ar * 0.5 + b.radius * 0.8;
+            const hitR2 = hitR * hitR;
+            const segs = b.segments;
+
+            for (let i = 0; i < segs.length; i++) {
+                const dx = segs[i].x - ah.x;
+                const dy = segs[i].y - ah.y;
+                if (dx * dx + dy * dy < hitR2) {
+                    if (i === 0) {
+                        if (a.length <= b.length) dead.add(a);
+                    } else {
+                        dead.add(a);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    for (const s of dead) killSnake(s);
+}
+
+// ============================================================
+// Camera
+// ============================================================
+
+function updateCamera(dt) {
+
+    if (player && player.alive) {
+        const k = 1 - Math.pow(0.85, dt);
+        camera.x += (player.head.x - camera.x) * k;
+        camera.y += (player.head.y - camera.y) * k;
+
+        // Zoom out as you grow, and a bit more on small screens
+        const screenZoom = clamp(Math.min(viewW, viewH) / 800, 0.55, 1);
+        const sizeZoom = clamp(1.05 - (player.length - START_LENGTH) / 1500, 0.55, 1);
+        const targetZoom = screenZoom * sizeZoom;
+        camera.zoom += (targetZoom - camera.zoom) * Math.min(1, 0.05 * dt);
+    }
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+
+function getView() {
+    const halfW = viewW / 2 / camera.zoom;
+    const halfH = viewH / 2 / camera.zoom;
+    return {
+        left: camera.x - halfW,
+        right: camera.x + halfW,
+        top: camera.y - halfH,
+        bottom: camera.y + halfH
+    };
+}
+
+function drawWorld(view) {
+
+    const z = camera.zoom;
+
+    // World background
+    ctx.fillStyle = "#111";
+    ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+    // Only the grid lines that are on screen, as one path
+    ctx.strokeStyle = "#1f1f1f";
+    ctx.lineWidth = 1 / z;
+    ctx.beginPath();
+
+    const top = Math.max(0, view.top);
+    const bottom = Math.min(WORLD_HEIGHT, view.bottom);
+    const left = Math.max(0, view.left);
+    const right = Math.min(WORLD_WIDTH, view.right);
+
+    for (let x = Math.max(0, Math.floor(view.left / 100) * 100); x <= right; x += 100) {
+        ctx.moveTo(x, top);
+        ctx.lineTo(x, bottom);
+    }
+    for (let y = Math.max(0, Math.floor(view.top / 100) * 100); y <= bottom; y += 100) {
+        ctx.moveTo(left, y);
+        ctx.lineTo(right, y);
+    }
+    ctx.stroke();
+
+    // Deadly border
+    ctx.strokeStyle = "#ff3b3b";
+    ctx.lineWidth = 8;
+    ctx.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+}
+
+function drawFood(view, time) {
+
+    const x0 = clamp(Math.floor(view.left / CELL_SIZE), 0, GRID_COLS - 1);
+    const x1 = clamp(Math.floor(view.right / CELL_SIZE), 0, GRID_COLS - 1);
+    const y0 = clamp(Math.floor(view.top / CELL_SIZE), 0, GRID_ROWS - 1);
+    const y1 = clamp(Math.floor(view.bottom / CELL_SIZE), 0, GRID_ROWS - 1);
+
+    for (let cy = y0; cy <= y1; cy++) {
+        for (let cx = x0; cx <= x1; cx++) {
+            const cell = foodGrid[cy * GRID_COLS + cx];
+            for (let i = 0; i < cell.length; i++) {
+                const f = cell[i];
+                if (f.eaten) continue;
+
+                const size = f.size * (1 + 0.12 * Math.sin(time * 0.004 + f.phase));
+
+                // Dropped food fades out before disappearing
+                ctx.globalAlpha = f.dropped && f.life < 120 ? f.life / 120 : 1;
+
+                ctx.fillStyle = f.color;
+                ctx.beginPath();
+                ctx.arc(f.x, f.y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawLeaderboard() {
+
+    const ranked = allSnakes()
+        .filter(s => s.alive)
+        .sort((a, b) => b.length - a.length);
+
+    const rows = ranked.slice(0, 5).map((s, i) => ({ rank: i + 1, snake: s }));
+
+    const playerRank = ranked.indexOf(player);
+    if (playerRank >= 5) rows.push({ rank: playerRank + 1, snake: player });
+
+    const w = 180;
+    const h = 34 + rows.length * 20;
+    const x = viewW - w - 15;
+    const y = 15;
+
+    ctx.fillStyle = "rgba(0,0,0,.4)";
+    ctx.fillRect(x, y, w, h);
+
+    ctx.fillStyle = "white";
+    ctx.font = "bold 14px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText("Leaderboard", x + 10, y + 21);
+
+    rows.forEach((row, i) => {
+        const ry = y + 44 + i * 20;
+        const isPlayer = row.snake === player;
+        ctx.fillStyle = isPlayer ? PLAYER_COLOR : "#ddd";
+        ctx.font = (isPlayer ? "bold " : "") + "13px Arial";
+        ctx.textAlign = "left";
+        ctx.fillText(`${row.rank}. ${row.snake.name}`, x + 10, ry);
+        ctx.textAlign = "right";
+        ctx.fillText(String(Math.floor(row.snake.length)), x + w - 10, ry);
+    });
+}
+
+function drawMinimap(view) {
+
+    const size = 140;
+    const x = viewW - size - 15;
+    const y = viewH - size - 15;
+    const sx = size / WORLD_WIDTH;
+    const sy = size / WORLD_HEIGHT;
+
+    ctx.fillStyle = "rgba(0,0,0,.45)";
+    ctx.fillRect(x, y, size, size);
+    ctx.strokeStyle = "rgba(255,255,255,.3)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, size, size);
+
+    // Bots
+    ctx.globalAlpha = 0.7;
+    for (const bot of bots) {
+        if (!bot.alive) continue;
+        ctx.fillStyle = bot.color;
+        ctx.beginPath();
+        ctx.arc(x + bot.head.x * sx, y + bot.head.y * sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Current view
+    ctx.strokeStyle = "rgba(255,255,255,.35)";
+    ctx.strokeRect(
+        x + clamp(view.left, 0, WORLD_WIDTH) * sx,
+        y + clamp(view.top, 0, WORLD_HEIGHT) * sy,
+        (clamp(view.right, 0, WORLD_WIDTH) - clamp(view.left, 0, WORLD_WIDTH)) * sx,
+        (clamp(view.bottom, 0, WORLD_HEIGHT) - clamp(view.top, 0, WORLD_HEIGHT)) * sy
+    );
+
+    // Player
+    if (player && player.alive) {
+        ctx.fillStyle = "white";
+        ctx.beginPath();
+        ctx.arc(x + player.head.x * sx, y + player.head.y * sy, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function drawGameOver() {
+
+    ctx.fillStyle = "rgba(0,0,0,.55)";
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    ctx.textAlign = "center";
+
+    ctx.fillStyle = "white";
+    ctx.font = "bold 48px Arial";
+    ctx.fillText("Game Over", viewW / 2, viewH / 2 - 30);
+
+    ctx.font = "22px Arial";
+    ctx.fillText(`Length: ${finalLength}    Best: ${bestLength}`, viewW / 2, viewH / 2 + 15);
+
+    if (deadTimer >= 30) {
+        ctx.fillStyle = "#ccc";
+        ctx.font = "16px Arial";
+        ctx.fillText("Click, tap or press Space to play again", viewW / 2, viewH / 2 + 55);
+    }
+}
+
+function render(time) {
+
+    // Outside-the-world background
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#070707";
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    // World space: everything below is drawn in world coordinates
+    const z = camera.zoom;
+    const view = getView();
+    ctx.setTransform(
+        dpr * z, 0, 0, dpr * z,
+        dpr * (viewW / 2 - camera.x * z),
+        dpr * (viewH / 2 - camera.y * z)
+    );
+
+    drawWorld(view);
+    drawFood(view, time);
+
+    for (const bot of bots) {
+        if (bot.alive) bot.draw(view);
+    }
+    if (player && player.alive) player.draw(view);
+
+    // Screen space UI
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawLeaderboard();
+    drawMinimap(view);
+    if (gameState === "dead") drawGameOver();
+}
+
+// ============================================================
+// HUD
+// ============================================================
+
+const scoreEl = document.getElementById("score");
+let lastShownScore = -1;
+
+function updateHud() {
+    const value = player && player.alive ? Math.floor(player.length) : finalLength;
+    if (value !== lastShownScore) {
+        scoreEl.textContent = value;
+        lastShownScore = value;
+    }
+}
+
+// ============================================================
+// Main loop (frame-rate independent)
+// ============================================================
+
+function update(dt) {
+
+    updateFood(dt);
+
+    if (gameState === "playing") {
+        const dx = mouseX - viewW / 2;
+        const dy = mouseY - viewH / 2;
+        if (dx * dx + dy * dy > 100) {
+            player.targetAngle = Math.atan2(dy, dx);
+        }
+        player.boosting = spaceDown || mouseDown || touchBoost;
+        player.update(dt);
+        eatFood(player, dt);
+    } else {
+        deadTimer += dt;
+    }
+
+    updateBots(dt);
+    checkCollisions();
+    updateCamera(dt);
+    updateHud();
+}
+
+let lastTime = performance.now();
+
+function gameLoop(now) {
+    // dt = 1.0 at 60fps; capped so a background tab doesn't cause a huge jump
+    const dt = clamp((now - lastTime) / (1000 / 60), 0, 3);
+    lastTime = now;
+
+    update(dt);
+    render(now);
+
+    requestAnimationFrame(gameLoop);
+}
+
+// ============================================================
+// Start
+// ============================================================
+
+for (let i = 0; i < AMBIENT_FOOD_TARGET; i++) spawnAmbientFood();
+
+startPlayer();
+
+for (let i = 0; i < BOT_COUNT; i++) {
+    spawnBot(Math.floor(rand(BOT_START_MIN, BOT_START_MAX + 1)));
+}
+
+rebuildFoodGrid();
+requestAnimationFrame(gameLoop);
+
+</script>
+
+</body>
+</html>
