@@ -1,0 +1,853 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Brick Breaker</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+  /* Layout: one arcade cabinet screen, centered, scaled to fit; key hints underneath. Single dark look by choice. */
+  :root {
+    --bg: #070b16;
+    --cabinet: #0d1426;
+    --edge: #1f2b4a;
+    --text: #e8ecf7;
+    --muted: #8691ad;
+    --paddle: #2f7bff;
+    --font-display: "Chakra Petch", "Trebuchet MS", system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: safe center;
+    gap: 14px;
+    padding-block: 16px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    box-sizing: border-box;
+    overflow-x: hidden;
+  }
+  .screen {
+    width: min(100%, 860px, calc((100vh - 110px) * 4 / 3));
+    aspect-ratio: 4 / 3;
+    max-width: 100%;
+    background: var(--cabinet);
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    box-shadow: 0 0 0 6px #0a1020, 0 20px 60px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: none;
+    touch-action: none;
+  }
+  canvas:focus-visible { outline: 2px solid var(--paddle); outline-offset: -2px; }
+  .keys {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px 18px;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: .02em;
+  }
+  kbd {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text);
+    border: 1px solid var(--edge);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 1px 6px;
+    background: var(--cabinet);
+  }
+  body.show-settings .screen { width: min(100%, 860px, calc((100vh - 200px) * 4 / 3)); }
+  .link-btn {
+    font: inherit;
+    color: var(--text);
+    background: var(--cabinet);
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    padding: 1px 8px;
+    cursor: pointer;
+  }
+  .link-btn:hover { border-color: var(--paddle); }
+  .link-btn:focus-visible { outline: 2px solid var(--paddle); outline-offset: 2px; }
+  .settings {
+    width: min(100%, 860px);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px 22px;
+    padding: 12px 16px;
+    box-sizing: border-box;
+    background: var(--cabinet);
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .field { display: flex; flex-direction: column; gap: 6px; flex: 1 1 150px; min-width: 0; }
+  .field label { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; font-size: 11px; }
+  .field output { color: var(--text); font-family: var(--font-display); font-weight: 700; font-size: 14px; text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+  .field input[type=range] { width: 100%; accent-color: var(--paddle); }
+  .settings button {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: .06em;
+    color: #fff;
+    background: var(--paddle);
+    border: 0;
+    border-radius: 5px;
+    padding: 9px 16px;
+    cursor: pointer;
+  }
+  .settings button:hover { filter: brightness(1.12); }
+  .settings button:focus-visible, .field input:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .settings .note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+</style>
+
+<div class="screen">
+  <canvas id="game" width="800" height="600" tabindex="0" aria-label="Brick Breaker game"></canvas>
+</div>
+<div class="keys">
+  <span><kbd>←</kbd> <kbd>→</kbd> or mouse to move</span>
+  <span><kbd>Space</kbd> or click to launch</span>
+  <span><kbd>P</kbd> pause</span>
+  <span><kbd>M</kbd> sound on/off</span>
+  <span><button type="button" class="link-btn" id="toggle-settings" aria-controls="settings" aria-expanded="false">Show settings</button> or <kbd>S</kbd></span>
+</div>
+<form class="settings" id="settings" aria-label="Game settings" hidden>
+  <div class="field">
+    <label for="set-levels">Levels <output id="out-levels" for="set-levels">6</output></label>
+    <input type="range" id="set-levels" min="1" max="10" step="1" value="6">
+  </div>
+  <div class="field">
+    <label for="set-speed">Faster per level <output id="out-speed" for="set-speed">+10%</output></label>
+    <input type="range" id="set-speed" min="0" max="30" step="1" value="10">
+  </div>
+  <div class="field">
+    <label for="set-start">Start at level <output id="out-start" for="set-start">1</output></label>
+    <input type="range" id="set-start" min="1" max="6" step="1" value="1">
+  </div>
+  <button type="submit" id="new-game">New game</button>
+  <p class="note">Speed changes take effect on the next serve. Start level applies when you begin a new game.</p>
+</form>
+
+<script>
+(() => {
+  // ---------- Config ----------
+  const W = 800, H = 600;
+  const HUD_H = 44;
+  const STEP = 1000 / 60;            // fixed 60 FPS simulation step (ms)
+  const START_LIVES = 5;
+
+  // Top row first. Points per brick by color.
+  const ROWS = [
+    { color: "#ff3b4a", glow: "#ff7a84", points: 50 }, // red
+    { color: "#ff8a1f", glow: "#ffb066", points: 40 }, // orange
+    { color: "#ffd21f", glow: "#ffe57a", points: 30 }, // yellow
+    { color: "#2fd46a", glow: "#7cf0a2", points: 20 }, // green
+    { color: "#2f8cff", glow: "#7ab6ff", points: 10 }, // blue
+  ];
+  const COLS = 10;
+  const BRICK_GAP = 6;
+  const BRICK_TOP = HUD_H + 40;
+  const BRICK_SIDE = 24;
+  const BRICK_H = 22;
+  const BRICK_W = (W - BRICK_SIDE * 2 - BRICK_GAP * (COLS - 1)) / COLS;
+
+  const PADDLE_W = 110, PADDLE_H = 14, PADDLE_Y = H - 40;
+  const PADDLE_SPEED = 9;             // px per step with arrow keys
+  // Five strike zones, left to right: angle from straight up (degrees)
+  const ZONE_ANGLES = [-60, -30, 0, 30, 60];
+
+  const BALL_R = 7;
+  const BALL_SPEED_START = 6.2;       // px per step
+  const BALL_SPEED_MAX = 9.5;
+  const BALL_SPEED_GAIN = 0.06;       // added per brick broken
+  const BALL_SPEED_CAP = 16;          // absolute limit, whatever the level
+
+  // Brick layouts. rows = how many rows; has(r, c) = is there a brick here.
+  // Colors (and points) run red at the top to blue at the bottom across however many rows there are.
+  const LAYOUTS = [
+    { name: "The Wall",     rows: 5,  has: () => true },
+    { name: "Pyramid",      rows: 5,  has: (r, c) => Math.abs(c - 4.5) <= r + 0.5 },
+    { name: "Checkerboard", rows: 8,  has: (r, c) => (r + c) % 2 === 0 },
+    { name: "Channels",     rows: 7,  has: (r, c) => c % 3 !== 2 },
+    { name: "Diamond",      rows: 9,  has: (r, c) => Math.abs(r - 4) + Math.abs(c - 4.5) <= 5.5 },
+    { name: "Fortress",     rows: 10, has: () => true },
+  ];
+
+  // Player settings (remembered in this browser when possible)
+  const settings = { levels: 6, speedStep: 10, startLevel: 1 };
+  try {
+    const saved = JSON.parse(localStorage.getItem("brickBreakerSettings") || "{}");
+    Object.assign(settings, saved);
+  } catch (e) {}
+  function saveSettings() {
+    try { localStorage.setItem("brickBreakerSettings", JSON.stringify(settings)); } catch (e) {}
+  }
+  function layoutFor(level) { return LAYOUTS[(level - 1) % LAYOUTS.length]; }
+  function speedFactor(level) { return 1 + settings.speedStep / 100 * (level - 1); }
+
+  // ---------- State ----------
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  let state;          // "ready" | "playing" | "paused" | "over" | "won"
+  let score, lives, bricks, paddle, ball, flash;
+  let particles = [], trail = [];
+  let level = 1, levelTimer = 0;
+  const keys = { left: false, right: false };
+
+  // ---------- Sound (synthesized with Web Audio, no files needed) ----------
+  let actx = null, master = null, noiseBuf = null, muted = false;
+  const VOLUME = 0.6;
+
+  function initAudio() {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      actx = new AC();
+      master = actx.createGain();
+      master.gain.value = muted ? 0 : VOLUME;
+      master.connect(actx.destination);
+      noiseBuf = actx.createBuffer(1, Math.floor(actx.sampleRate * 0.6), actx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    if (actx.state === "suspended") actx.resume();
+  }
+  function setMuted(m) {
+    muted = m;
+    if (master) master.gain.value = m ? 0 : VOLUME;
+  }
+  function envelope(g, t, vol, dur, attack = 0.002) {
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  }
+  function tone({ type = "sine", f0, f1, dur, vol, delay = 0, attack }) {
+    const t = actx.currentTime + delay;
+    const osc = actx.createOscillator(), g = actx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, t);
+    if (f1) osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    envelope(g, t, vol, dur, attack);
+    osc.connect(g).connect(master);
+    osc.start(t); osc.stop(t + dur + 0.03);
+  }
+  function noise({ filter = "lowpass", f0, f1, q = 1, dur, vol, delay = 0, attack }) {
+    const t = actx.currentTime + delay;
+    const src = actx.createBufferSource();
+    src.buffer = noiseBuf;
+    src.playbackRate.value = 0.8 + Math.random() * 0.4;
+    const f = actx.createBiquadFilter(), g = actx.createGain();
+    f.type = filter; f.Q.value = q;
+    f.frequency.setValueAtTime(f0, t);
+    if (f1) f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    envelope(g, t, vol, dur, attack);
+    src.connect(f).connect(g).connect(master);
+    src.start(t, Math.random() * 0.2); src.stop(t + dur + 0.03);
+  }
+
+  const sfx = {
+    // Hollow ping-pong "tok": short bright knock with a tiny click on top
+    paddle(zone) {
+      if (!actx || muted) return;
+      const p = 1 + (zone - 2) * 0.04;            // edges sound a touch different
+      tone({ type: "sine", f0: 1350 * p, f1: 980 * p, dur: 0.07, vol: 0.45, attack: 0.001 });
+      tone({ type: "triangle", f0: 2700 * p, f1: 2100 * p, dur: 0.03, vol: 0.12, attack: 0.001 });
+      noise({ filter: "bandpass", f0: 4200, q: 2, dur: 0.018, vol: 0.25, attack: 0.0005 });
+    },
+    // Lighter tick off the walls and ceiling
+    wall() {
+      if (!actx || muted) return;
+      tone({ type: "sine", f0: 1700, f1: 1400, dur: 0.035, vol: 0.12, attack: 0.001 });
+    },
+    // Sledgehammer on brick: sharp crack, heavy low thud, solid body clunk, then rubble crumbling.
+    // Top rows (red) hit hardest; blue rows a bit lighter.
+    brick(row) {
+      if (!actx || muted) return;
+      const power = 1 - row / (ROWS.length - 1) * 0.4;   // red 1.0 → blue 0.6
+      const v = 0.6 + Math.random() * 0.08;               // slight variation per hit
+      // 1. Crack of steel meeting masonry
+      noise({ filter: "bandpass", f0: 1800, q: 0.7, dur: 0.035, vol: 0.55 * power, attack: 0.0005 });
+      noise({ filter: "highpass", f0: 5000, dur: 0.02, vol: 0.18, attack: 0.0005 });
+      // 2. Heavy low thud (the weight of the hammer)
+      tone({ type: "sine", f0: 130 * v / 0.64, f1: 38, dur: 0.32 + power * 0.1, vol: 0.75 * power, attack: 0.001 });
+      tone({ type: "sine", f0: 70, f1: 32, dur: 0.28, vol: 0.4 * power, attack: 0.003 });
+      // 3. Dull body of the brick
+      noise({ filter: "lowpass", f0: 700, f1: 120, q: 1.4, dur: 0.18, vol: 0.5 * power, attack: 0.001 });
+      tone({ type: "triangle", f0: 240 * v / 0.64, f1: 110, dur: 0.09, vol: 0.25 * power, attack: 0.001 });
+      // 4. Rubble: a few small chunks dropping just after the hit
+      const chunks = 3 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < chunks; i++) {
+        noise({
+          filter: "bandpass", f0: 900 + Math.random() * 1800, q: 1.5,
+          dur: 0.03 + Math.random() * 0.04, vol: 0.08 + Math.random() * 0.1,
+          delay: 0.05 + i * 0.035 + Math.random() * 0.03, attack: 0.001,
+        });
+      }
+    },
+    launch() {
+      if (!actx || muted) return;
+      tone({ type: "triangle", f0: 520, f1: 980, dur: 0.12, vol: 0.18, attack: 0.004 });
+    },
+    lose() {
+      if (!actx || muted) return;
+      tone({ type: "triangle", f0: 440, f1: 110, dur: 0.55, vol: 0.28, attack: 0.01 });
+      noise({ filter: "lowpass", f0: 900, f1: 120, dur: 0.4, vol: 0.12, attack: 0.01 });
+    },
+    over() {
+      if (!actx || muted) return;
+      [392, 330, 262, 196].forEach((f, i) =>
+        tone({ type: "triangle", f0: f, dur: i === 3 ? 0.7 : 0.22, vol: 0.25, delay: i * 0.2, attack: 0.01 }));
+    },
+    win() {
+      if (!actx || muted) return;
+      [523, 659, 784, 1047].forEach((f, i) =>
+        tone({ type: "triangle", f0: f, dur: i === 3 ? 0.6 : 0.16, vol: 0.22, delay: i * 0.12, attack: 0.005 }));
+    },
+  };
+
+  // ---------- Particles ----------
+  function burst(b) {
+    const count = 26;
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 0.8 + Math.random() * 4.2;
+      const life = 28 + Math.random() * 30;
+      particles.push({
+        x: b.x + Math.random() * b.w,
+        y: b.y + Math.random() * b.h,
+        vx: Math.cos(a) * s + ball.vx * 0.12,
+        vy: Math.sin(a) * s - 1.2 + ball.vy * 0.08,
+        size: 1.5 + Math.random() * 3.5,
+        rot: Math.random() * Math.PI, spin: (Math.random() - 0.5) * 0.4,
+        life, max: life,
+        color: Math.random() < 0.3 ? b.glow : b.color,
+      });
+    }
+    // a few bright white sparks
+    for (let i = 0; i < 6; i++) {
+      const a = Math.random() * Math.PI * 2, s = 3 + Math.random() * 4;
+      particles.push({
+        x: b.x + b.w / 2, y: b.y + b.h / 2,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        size: 1.5, rot: 0, spin: 0, life: 14, max: 14, color: "#ffffff",
+      });
+    }
+  }
+  function updateParticles() {
+    for (const p of particles) {
+      p.vy += 0.16;            // gravity
+      p.vx *= 0.985; p.vy *= 0.985;
+      p.x += p.vx; p.y += p.vy;
+      p.rot += p.spin;
+      p.life--;
+    }
+    particles = particles.filter(p => p.life > 0 && p.y < H + 20);
+  }
+
+  function makeBricks(lvl) {
+    const layout = layoutFor(lvl);
+    const list = [];
+    for (let r = 0; r < layout.rows; r++) {
+      const ci = Math.floor(r * ROWS.length / layout.rows);   // which color band this row belongs to
+      const row = ROWS[ci];
+      for (let c = 0; c < COLS; c++) {
+        if (!layout.has(r, c)) continue;
+        list.push({
+          x: BRICK_SIDE + c * (BRICK_W + BRICK_GAP),
+          y: BRICK_TOP + r * (BRICK_H + BRICK_GAP),
+          w: BRICK_W, h: BRICK_H,
+          color: row.color, glow: row.glow, points: row.points, row: ci,
+          alive: true,
+        });
+      }
+    }
+    return list;
+  }
+
+  function resetBall() {
+    ball = { x: paddle.x + paddle.w / 2, y: PADDLE_Y - BALL_R - 1, vx: 0, vy: 0, speed: Math.min(BALL_SPEED_CAP, BALL_SPEED_START * speedFactor(level)), stuck: true };
+    trail = [];
+  }
+
+  function loadLevel(n) {
+    level = n;
+    bricks = makeBricks(level);
+    flash = [];
+    resetBall();
+    state = "ready";
+  }
+
+  function newGame() {
+    score = 0;
+    lives = START_LIVES;
+    paddle = { x: (W - PADDLE_W) / 2, w: PADDLE_W };
+    particles = [];
+    loadLevel(Math.min(settings.startLevel, settings.levels));
+  }
+
+  function launch() {
+    if (!ball.stuck) return;
+    // Launch at a slight random angle so the first shot isn't always identical
+    const a = (Math.random() * 30 - 15) * Math.PI / 180;
+    ball.vx = ball.speed * Math.sin(a);
+    ball.vy = -ball.speed * Math.cos(a);
+    ball.stuck = false;
+    state = "playing";
+    sfx.launch();
+  }
+
+  // ---------- Input ----------
+  function primaryAction() {
+    initAudio();
+    if (state === "over" || state === "won") { newGame(); return; }
+    if (state === "paused") { state = "playing"; return; }
+    if (ball.stuck) launch();
+  }
+
+  window.addEventListener("keydown", e => {
+    // Let the settings controls use their own keys
+    if (e.target instanceof HTMLElement && e.target.closest(".settings")) return;
+    initAudio();
+    if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+    if (e.key === "s" || e.key === "S") { toggleSettings(); return; }
+    if (e.key === "ArrowLeft") { keys.left = true; e.preventDefault(); }
+    else if (e.key === "ArrowRight") { keys.right = true; e.preventDefault(); }
+    else if (e.code === "Space" || e.key === "Enter") { primaryAction(); e.preventDefault(); }
+    else if (e.key === "p" || e.key === "P") {
+      if (state === "playing") state = "paused";
+      else if (state === "paused") state = "playing";
+    }
+  });
+  window.addEventListener("keyup", e => {
+    if (e.key === "ArrowLeft") keys.left = false;
+    if (e.key === "ArrowRight") keys.right = false;
+  });
+
+  function pointerToGameX(clientX) {
+    const r = canvas.getBoundingClientRect();
+    return (clientX - r.left) * (W / r.width);
+  }
+  function movePaddleTo(x) {
+    if (state === "paused") return;
+    paddle.x = Math.max(0, Math.min(W - paddle.w, x - paddle.w / 2));
+  }
+  canvas.addEventListener("mousemove", e => movePaddleTo(pointerToGameX(e.clientX)));
+  canvas.addEventListener("mousedown", e => { if (e.button === 0) { canvas.focus(); primaryAction(); } });
+  canvas.addEventListener("touchstart", e => { movePaddleTo(pointerToGameX(e.touches[0].clientX)); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener("touchmove", e => { movePaddleTo(pointerToGameX(e.touches[0].clientX)); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener("touchend", e => { primaryAction(); e.preventDefault(); }, { passive: false });
+
+  // ---------- Update ----------
+  function update() {
+    if (state === "paused") return;
+    if (state === "over" || state === "won") { tickFlash(); return; }
+    if (state === "cleared") {
+      tickFlash();
+      if (--levelTimer <= 0) loadLevel(level + 1);
+      return;
+    }
+
+    if (keys.left)  paddle.x -= PADDLE_SPEED;
+    if (keys.right) paddle.x += PADDLE_SPEED;
+    paddle.x = Math.max(0, Math.min(W - paddle.w, paddle.x));
+
+    if (ball.stuck) {
+      ball.x = paddle.x + paddle.w / 2;
+      ball.y = PADDLE_Y - BALL_R - 1;
+      tickFlash();
+      return;
+    }
+
+    // Move in small sub-steps so a fast ball never skips through a brick
+    const dist = Math.hypot(ball.vx, ball.vy);
+    const n = Math.max(1, Math.ceil(dist / (BALL_R * 0.8)));
+    for (let i = 0; i < n; i++) {
+      ball.x += ball.vx / n;
+      ball.y += ball.vy / n;
+      if (collideWalls()) return;
+      collidePaddle();
+      if (collideBricks()) break;
+    }
+    if (!ball.stuck) {
+      trail.push({ x: ball.x, y: ball.y });
+      if (trail.length > 9) trail.shift();
+    }
+    tickFlash();
+  }
+
+  function collideWalls() {
+    if (ball.x - BALL_R < 0)   { ball.x = BALL_R;     ball.vx = Math.abs(ball.vx); sfx.wall(); }
+    if (ball.x + BALL_R > W)   { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); sfx.wall(); }
+    if (ball.y - BALL_R < HUD_H) { ball.y = HUD_H + BALL_R; ball.vy = Math.abs(ball.vy); sfx.wall(); }
+    if (ball.y - BALL_R > H) {
+      lives--;
+      if (lives <= 0) { lives = 0; state = "over"; sfx.over(); }
+      else { resetBall(); state = "ready"; sfx.lose(); }
+      return true;
+    }
+    return false;
+  }
+
+  function collidePaddle() {
+    if (ball.vy <= 0) return;
+    const top = PADDLE_Y, bottom = PADDLE_Y + PADDLE_H;
+    if (ball.y + BALL_R < top || ball.y - BALL_R > bottom) return;
+    if (ball.x + BALL_R < paddle.x || ball.x - BALL_R > paddle.x + paddle.w) return;
+
+    // Which of the five zones did it hit?
+    const rel = (ball.x - paddle.x) / paddle.w;
+    const zone = Math.max(0, Math.min(4, Math.floor(rel * 5)));
+    const a = ZONE_ANGLES[zone] * Math.PI / 180;
+    ball.vx = ball.speed * Math.sin(a);
+    ball.vy = -ball.speed * Math.cos(a);
+    ball.y = top - BALL_R - 0.5;
+    paddle.hitZone = zone;
+    paddle.hitTimer = 10;
+    sfx.paddle(zone);
+  }
+
+  function collideBricks() {
+    for (const b of bricks) {
+      if (!b.alive) continue;
+      // Closest point on the brick to the ball centre
+      const cx = Math.max(b.x, Math.min(ball.x, b.x + b.w));
+      const cy = Math.max(b.y, Math.min(ball.y, b.y + b.h));
+      const dx = ball.x - cx, dy = ball.y - cy;
+      if (dx * dx + dy * dy > BALL_R * BALL_R) continue;
+
+      b.alive = false;
+      score += b.points;
+      flash.push({ x: b.x, y: b.y, w: b.w, h: b.h, color: b.glow, t: 8 });
+      burst(b);
+      sfx.brick(b.row);
+
+      // Bounce off the side with the smallest overlap
+      const overlapX = Math.min(ball.x + BALL_R - b.x, b.x + b.w - (ball.x - BALL_R));
+      const overlapY = Math.min(ball.y + BALL_R - b.y, b.y + b.h - (ball.y - BALL_R));
+      if (overlapX < overlapY) ball.vx = -ball.vx; else ball.vy = -ball.vy;
+
+      // Gently speed up as bricks fall
+      const s = Math.min(BALL_SPEED_CAP, BALL_SPEED_MAX * speedFactor(level), ball.speed + BALL_SPEED_GAIN);
+      const k = s / ball.speed;
+      ball.vx *= k; ball.vy *= k; ball.speed = s;
+
+      if (bricks.every(x => !x.alive)) {
+        sfx.win();
+        if (level < settings.levels) { state = "cleared"; levelTimer = 150; }
+        else state = "won";
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function tickFlash() {
+    for (const f of flash) f.t--;
+    flash = flash.filter(f => f.t > 0);
+    if (paddle.hitTimer) paddle.hitTimer--;
+    updateParticles();
+  }
+
+  // ---------- Draw ----------
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#0b1224");
+    g.addColorStop(1, "#05080f");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    // faint grid
+    ctx.strokeStyle = "rgba(90,120,200,0.06)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += 40) { ctx.beginPath(); ctx.moveTo(x + .5, HUD_H); ctx.lineTo(x + .5, H); ctx.stroke(); }
+    for (let y = HUD_H; y <= H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); ctx.stroke(); }
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#0a1020";
+    ctx.fillRect(0, 0, W, HUD_H);
+    ctx.fillStyle = "#1f2b4a";
+    ctx.fillRect(0, HUD_H - 1, W, 1);
+
+    ctx.textBaseline = "middle";
+    ctx.font = "500 13px 'IBM Plex Mono', monospace";
+    ctx.fillStyle = "#8691ad";
+    ctx.textAlign = "left";
+    ctx.fillText("SCORE", 20, HUD_H / 2);
+    ctx.font = "700 22px 'Chakra Petch', sans-serif";
+    ctx.fillStyle = "#e8ecf7";
+    ctx.fillText(String(score).padStart(5, "0"), 74, HUD_H / 2 + 1);
+
+    // Level
+    ctx.textAlign = "center";
+    ctx.font = "500 13px 'IBM Plex Mono', monospace";
+    ctx.fillStyle = "#8691ad";
+    ctx.fillText("LEVEL", W / 2 - 30, HUD_H / 2);
+    ctx.font = "700 20px 'Chakra Petch', sans-serif";
+    ctx.fillStyle = "#e8ecf7";
+    ctx.textAlign = "left";
+    ctx.fillText(level + " / " + settings.levels, W / 2 + 2, HUD_H / 2 + 1);
+
+    // Sound status
+    ctx.textAlign = "right";
+    ctx.font = "500 11px 'IBM Plex Mono', monospace";
+    ctx.fillStyle = muted ? "#ff8a1f" : "#5b6788";
+    ctx.fillText(muted ? "SOUND OFF (M)" : "SOUND ON (M)", W - 205, HUD_H / 2);
+
+    // Lives as small paddle pips
+    ctx.textAlign = "right";
+    ctx.font = "500 13px 'IBM Plex Mono', monospace";
+    ctx.fillStyle = "#8691ad";
+    const pipsW = START_LIVES * 22;
+    ctx.fillText("LIVES", W - 28 - pipsW, HUD_H / 2);
+    for (let i = 0; i < START_LIVES; i++) {
+      const x = W - 20 - pipsW + i * 22 + 4;
+      roundRect(x, HUD_H / 2 - 3, 16, 6, 3);
+      ctx.fillStyle = i < lives ? "#2f7bff" : "#1f2b4a";
+      ctx.fill();
+    }
+  }
+
+  function drawBricks() {
+    for (const b of bricks) {
+      if (!b.alive) continue;
+      roundRect(b.x, b.y, b.w, b.h, 3);
+      ctx.fillStyle = b.color;
+      ctx.fill();
+      // top highlight + bottom shade for a bit of depth
+      ctx.fillStyle = "rgba(255,255,255,0.28)";
+      ctx.fillRect(b.x + 3, b.y + 2, b.w - 6, 3);
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(b.x + 2, b.y + b.h - 4, b.w - 4, 3);
+    }
+    for (const f of flash) {
+      const p = f.t / 8;
+      const grow = (1 - p) * 8;
+      ctx.globalAlpha = p;
+      roundRect(f.x - grow, f.y - grow / 2, f.w + grow * 2, f.h + grow, 4);
+      ctx.fillStyle = f.color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawPaddle() {
+    const x = paddle.x, y = PADDLE_Y, w = paddle.w, h = PADDLE_H;
+    ctx.shadowColor = "rgba(47,123,255,0.6)";
+    ctx.shadowBlur = 14;
+    roundRect(x, y, w, h, 7);
+    ctx.fillStyle = "#2f7bff";
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // zone ticks (5 strike areas)
+    ctx.fillStyle = "rgba(255,255,255,0.22)";
+    for (let i = 1; i < 5; i++) ctx.fillRect(x + (w / 5) * i - 0.5, y + 3, 1, h - 6);
+    // brief highlight of the zone that was just hit
+    if (paddle.hitTimer) {
+      ctx.globalAlpha = paddle.hitTimer / 10 * 0.5;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x + (w / 5) * paddle.hitZone, y + 2, w / 5, h - 4);
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fillRect(x + 8, y + 2, w - 16, 2);
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawTrail() {
+    const n = trail.length;
+    for (let i = 0; i < n; i++) {
+      const k = (i + 1) / (n + 1);          // older = smaller and fainter
+      ctx.globalAlpha = k * 0.28;
+      ctx.beginPath();
+      ctx.arc(trail[i].x, trail[i].y, BALL_R * (0.35 + 0.6 * k), 0, Math.PI * 2);
+      ctx.fillStyle = "#cfe0ff";
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBall() {
+    ctx.shadowColor = "rgba(255,255,255,0.8)";
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function centerText(text, y, font, color) {
+    ctx.font = font;
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, W / 2, y);
+  }
+
+  function drawOverlay() {
+    const blink = Math.floor(performance.now() / 500) % 2 === 0;
+    if (state === "ready") {
+      const pct = Math.round(speedFactor(level) * 100);
+      centerText("LEVEL " + level + "  ·  " + layoutFor(level).name.toUpperCase(), H - 150, "700 24px 'Chakra Petch', sans-serif", "#e8ecf7");
+      centerText("Ball speed " + pct + "%", H - 124, "400 13px 'IBM Plex Mono', monospace", "#8691ad");
+      if (blink) centerText("PRESS SPACE OR CLICK TO LAUNCH", H - 96, "500 15px 'IBM Plex Mono', monospace", "#c7cfe6");
+      return;
+    }
+    if (state === "cleared") {
+      ctx.fillStyle = "rgba(5,8,15,0.55)";
+      ctx.fillRect(0, HUD_H, W, H - HUD_H);
+      centerText("LEVEL " + level + " CLEAR", H / 2 - 30, "700 52px 'Chakra Petch', sans-serif", "#2fd46a");
+      const next = level + 1;
+      centerText("Next: " + layoutFor(next).name + "  ·  ball speed " + Math.round(speedFactor(next) * 100) + "%",
+        H / 2 + 22, "400 15px 'IBM Plex Mono', monospace", "#c7cfe6");
+      return;
+    }
+    if (state === "paused") {
+      ctx.fillStyle = "rgba(5,8,15,0.6)";
+      ctx.fillRect(0, HUD_H, W, H - HUD_H);
+      centerText("PAUSED", H / 2 - 10, "700 44px 'Chakra Petch', sans-serif", "#e8ecf7");
+      centerText("Press P to resume", H / 2 + 34, "400 15px 'IBM Plex Mono', monospace", "#8691ad");
+      return;
+    }
+    if (state === "over" || state === "won") {
+      ctx.fillStyle = "rgba(5,8,15,0.82)";
+      ctx.fillRect(0, 0, W, H);
+      const title = state === "over" ? "GAME OVER" : "ALL LEVELS CLEARED";
+      const color = state === "over" ? "#ff3b4a" : "#2fd46a";
+      centerText(title, H / 2 - 70, "700 60px 'Chakra Petch', sans-serif", color);
+      centerText("FINAL SCORE", H / 2 - 4, "500 14px 'IBM Plex Mono', monospace", "#8691ad");
+      centerText(String(score), H / 2 + 34, "700 46px 'Chakra Petch', sans-serif", "#e8ecf7");
+
+      // Replay button (clicking anywhere also works)
+      const bw = 220, bh = 50, bx = (W - bw) / 2, by = H / 2 + 86;
+      roundRect(bx, by, bw, bh, 8);
+      ctx.fillStyle = "#2f7bff";
+      ctx.fill();
+      centerText("REPLAY", by + bh / 2 + 1, "700 22px 'Chakra Petch', sans-serif", "#ffffff");
+      if (blink) centerText("Space, Enter or click", by + bh + 28, "400 13px 'IBM Plex Mono', monospace", "#8691ad");
+    }
+  }
+
+  function draw() {
+    drawBackground();
+    drawBricks();
+    drawParticles();
+    drawPaddle();
+    if (state === "ready" || state === "playing" || state === "paused") { drawTrail(); drawBall(); }
+    drawHUD();
+    drawOverlay();
+  }
+
+  // ---------- Loop: fixed 60 FPS updates, render every frame ----------
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    acc += Math.min(250, now - last);
+    last = now;
+    while (acc >= STEP) { update(); acc -= STEP; }
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- Settings panel ----------
+  const elLevels = document.getElementById("set-levels");
+  const elSpeed = document.getElementById("set-speed");
+  const elStart = document.getElementById("set-start");
+  const outLevels = document.getElementById("out-levels");
+  const outSpeed = document.getElementById("out-speed");
+  const outStart = document.getElementById("out-start");
+
+  function clampSettings() {
+    settings.levels = Math.max(1, Math.min(10, Math.round(+settings.levels || 6)));
+    settings.speedStep = Math.max(0, Math.min(30, Math.round(+settings.speedStep || 0)));
+    settings.startLevel = Math.max(1, Math.min(settings.levels, Math.round(+settings.startLevel || 1)));
+  }
+  function renderSettings() {
+    elLevels.value = settings.levels;
+    elSpeed.value = settings.speedStep;
+    elStart.max = settings.levels;
+    elStart.value = settings.startLevel;
+    outLevels.textContent = settings.levels;
+    outSpeed.textContent = "+" + settings.speedStep + "%";
+    outStart.textContent = settings.startLevel;
+  }
+  function readSettings() {
+    settings.levels = +elLevels.value;
+    settings.speedStep = +elSpeed.value;
+    settings.startLevel = +elStart.value;
+    clampSettings();
+    renderSettings();
+    saveSettings();
+  }
+  [elLevels, elSpeed, elStart].forEach(el => el.addEventListener("input", readSettings));
+  document.getElementById("settings").addEventListener("submit", e => {
+    e.preventDefault();
+    initAudio();
+    newGame();
+    canvas.focus();
+  });
+
+  // Show / hide the settings panel (hidden by default, remembered in this browser)
+  const panel = document.getElementById("settings");
+  const toggleBtn = document.getElementById("toggle-settings");
+  function setSettingsVisible(show) {
+    panel.hidden = !show;
+    document.body.classList.toggle("show-settings", show);
+    toggleBtn.textContent = show ? "Hide settings" : "Show settings";
+    toggleBtn.setAttribute("aria-expanded", String(show));
+    try { localStorage.setItem("brickBreakerSettingsOpen", show ? "1" : "0"); } catch (e) {}
+  }
+  function toggleSettings() {
+    setSettingsVisible(panel.hidden);
+    if (state === "playing") state = "paused";   // don't lose a ball while adjusting
+  }
+  toggleBtn.addEventListener("click", () => { toggleSettings(); canvas.focus(); });
+  let openAtStart = false;
+  try { openAtStart = localStorage.getItem("brickBreakerSettingsOpen") === "1"; } catch (e) {}
+  setSettingsVisible(openAtStart);
+
+  clampSettings();
+  renderSettings();
+  newGame();
+  canvas.focus();
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body></html>
